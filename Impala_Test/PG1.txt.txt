@@ -1,0 +1,76 @@
+import java.io.File;
+import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
+import org.apache.hadoop.security.authentication.util.KerberosUtil;
+import org.apache.impala.jdbc.DataSource;
+
+public class ImpalaKerberosAuthenticator {
+
+  public static void main(String[] args) throws Exception {
+    String principal = "user@EXAMPLE.COM";
+    String keytabPath = "/path/to/user.keytab";
+    String impalaHost = "impala.example.com";
+    int impalaPort = 21050;
+
+    // Login from the keytab and obtain a TGT
+    UserGroupInformation.setConfiguration(new Configuration());
+    UserGroupInformation.loginUserFromKeytab(principal, keytabPath);
+
+    // Check the authentication method
+    UserGroupInformation ugi = UserGroupInformation.getLoginUser();
+    if (ugi.getAuthenticationMethod() != AuthenticationMethod.KERBEROS) {
+      throw new IllegalStateException("Login failed for principal " + principal);
+    }
+
+    // Set the Kerberos configuration properties
+    Configuration conf = new Configuration();
+    conf.set("hadoop.security.authentication", "kerberos");
+    conf.set("hadoop.security.authorization", "true");
+    conf.set("hadoop.security.auth_to_local", "DEFAULT");
+
+    // Set the Kerberos principal and keytab path
+    conf.set("hbase.master.kerberos.principal", principal);
+    conf.set("hbase.regionserver.kerberos.principal", principal);
+    conf.set("hbase.master.keytab.file", keytabPath);
+    conf.set("hbase.regionserver.keytab.file", keytabPath);
+
+    // Set the Kerberos configuration file
+    String krb5conf = KerberosUtil.getDefaultKrb5ConfigPath();
+    if (krb5conf != null && new File(krb5conf).exists()) {
+      conf.set("java.security.krb5.conf", krb5conf);
+    }
+
+    // Configure the Impala JDBC data source
+    String jdbcUrl = "jdbc:impala://" + impalaHost + ":" + impalaPort + "/";
+    DataSource ds = new DataSource();
+    ds.setURL(jdbcUrl);
+    ds.setKerberosAuthType("fromSubject");
+    ds.setLoginTimeout((int) TimeUnit.SECONDS.toSeconds(30));
+
+    // Execute a query using the authenticated connection
+    String query = "SELECT COUNT(*) FROM mytable";
+    ugi.doAs((PrivilegedExceptionAction<Void>) () -> {
+      try (java.sql.Connection conn = ds.getConnection()) {
+        try (java.sql.Statement stmt = conn.createStatement()) {
+          try (java.sql.ResultSet rs = stmt.executeQuery(query)) {
+            while (rs.next()) {
+              int count = rs.getInt(1);
+              System.out.println("Record count: " + count);
+            }
+          }
+        }
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      } catch (java.sql.SQLException e) {
+        throw new RuntimeException(e);
+      }
+      return null;
+    });
+  }
+
+}
